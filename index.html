@@ -1,16 +1,28 @@
-<!doctype html>
-<html lang="de-CH">
+<!DOCTYPE html>
+<html lang="en">
 <head>
-    <meta charset="utf-8">
-    <title>Hide n Seek</title>
-    <link href="main.css" rel="stylesheet_main">
-    <link href="main.js" rel="logic_main">
+    <meta charset="UTF-8">
+    <title>Top Down Flashlight Game</title>
+    <style>
+        body { margin: 0; background: #111; display: flex; justify-content: center; align-items: center; height: 100vh; }
+        canvas { background: #000; border: 2px solid #333; }
+    </style>
 </head>
-adlkf
 <body>
 
-<canvas id="myCanvas" width="800" height="600" style="border:1px solid black;"></canvas>
+<!-- CRITICAL: Ensure this ID matches document.getElementById() exactly -->
+<canvas id="myCanvas" width="800" height="600"></canvas>
+
+<!-- CRITICAL: Ensure this script src matches your file name (e.g., main.js) -->
 <script src="main.js"></script>
+<style>
+    body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden; /* Removes scrollbars completely */
+        background-color: #000;
+    }
+</style>
 
 </body>
 </html>
