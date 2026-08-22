@@ -1,3 +1,149 @@
+let canvas = document.getElementById("gameCanvas");
+if (!canvas) {
+    canvas = document.createElement("canvas");
+    canvas.id = "gameCanvas";
+    canvas.width = 800;
+    canvas.height = 600;
+    document.body.appendChild(canvas);
+}
+let ctx = canvas.getContext("2d");
+
+let gameState = "START";
+let usernameInputText = "";
+let isGameWinner = null;
+let activeButtons = [];
+let playerList = [];
+let remotePlayers = new Map();
+let localId = null;
+let isLobbyLeader = false;
+let mockSocket = null;
+
+let player = {
+    x: 400,
+    y: 300,
+    radius: 15,
+    speed: 4,
+    angle: 0,
+    role: "verstecker",
+    isFound: false
+};
+
+let serverPlayers = [];
+let serverGameActive = false;
+let serverSeekerId = null;
+
+function setupMockNetworkRouting() {
+    if (window.serverInitialized) return;
+    window.serverInitialized = true;
+    serverPlayers = [];
+    serverGameActive = false;
+}
+
+function connectToSocket(username) {
+    let clientId = username + "_" + Math.floor(Math.random() * 10000);
+    localId = clientId;
+    let isHost = serverPlayers.length === 0;
+
+    serverPlayers.push({
+        id: clientId,
+        name: username,
+        isHost: isHost,
+        role: "verstecker",
+        is_found: false,
+        x: Math.random() * 600 + 100,
+        y: Math.random() * 400 + 100
+    });
+
+    mockSocket = {
+        send: function(msgString) {
+            let msg = JSON.parse(msgString);
+
+            if (msg.type === "start_game") {
+                if (serverPlayers.length >= 2 && !serverGameActive) {
+                    serverGameActive = true;
+                    let randomIndex = Math.floor(Math.random() * serverPlayers.length);
+                    serverSeekerId = serverPlayers[randomIndex].id;
+
+                    serverPlayers.forEach(p => {
+                        p.role = (p.id === serverSeekerId) ? "sucher" : "verstecker";
+                        p.is_found = false;
+                    });
+
+                    broadcastMock({ type: "game_started", players: serverPlayers });
+                }
+            } else if (msg.type === "player_found") {
+                let target = serverPlayers.find(p => p.id === msg.target_client);
+                if (target) {
+                    target.is_found = true;
+                    broadcastMock({ type: "update_state", players: serverPlayers });
+
+                    let activeHiders = serverPlayers.filter(p => p.role === "verstecker" && !p.is_found);
+                    if (activeHiders.length === 0) {
+                        serverGameActive = false;
+                        broadcastMock({ type: "game_over", winner: "sucher" });
+                    }
+                }
+            }
+        }
+    };
+
+    if (serverGameActive) {
+        let p = serverPlayers.find(p => p.id === clientId);
+        if (p) p.role = "verstecker";
+        broadcastMock({ type: "game_started", players: serverPlayers });
+    } else {
+        broadcastMock({ type: "lobby_update", players: serverPlayers });
+    }
+}
+
+function broadcastMock(data) {
+    setTimeout(() => {
+        if (data.type === "lobby_update") {
+            playerList = data.players.map(p => ({ client_id: p.name, id: p.id }));
+            let me = data.players.find(p => p.id === localId);
+            if (me) isLobbyLeader = me.isHost;
+        } else if (data.type === "game_started" || data.type === "update_state") {
+            gameState = "PLAYING";
+            let me = data.players.find(p => p.id === localId);
+            if (me) {
+                player.role = me.role;
+                player.isFound = me.is_found;
+            }
+
+            remotePlayers.clear();
+            data.players.forEach(p => {
+                if (p.id !== localId) {
+                    remotePlayers.set(p.id, {
+                        client_id: p.id,
+                        role: p.role,
+                        is_found: p.is_found,
+                        x: p.x,
+                        y: p.y,
+                        radius: 15,
+                        speed: 4,
+                        angle: 0,
+                        changeDirTimer: 0
+                    });
+                }
+            });
+        } else if (data.type === "game_over") {
+            isGameWinner = data.winner;
+        }
+    }, 20);
+}
+
+function drawStartScreen() {
+    ctx.fillStyle = "#0a0f0d";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#ffdd66";
+    ctx.font = "bold 32px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("HIDE AND SEEK PROTOKOLL", canvas.width / 2, canvas.height / 2 - 20);
+    ctx.fillStyle = "rgba(255,255,255,0.6)";
+    ctx.font = "16px sans-serif";
+    ctx.fillText("Drücke LEERTASTE um zu starten", canvas.width / 2, canvas.height / 2 + 20);
+}
+
 function drawButton(text, x, y, w, h, baseColor, hoverColor, callback) {
     // FIXED: Completed the missing comparative coordinate equation
     let isHovered = (mouse_position.x >= x && mouse_position.x <= x + w &&
@@ -49,6 +195,75 @@ function drawLobbySelect() {
     });
 }
 
+function drawLobbyRoom() {
+    ctx.fillStyle = "#0c1210"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.textAlign = "left"; ctx.fillStyle = "#ffdd66"; ctx.font = "bold 28px sans-serif";
+    ctx.fillText("SERVER SIMULATOR ROOM CHANNELS", 50, 60);
+
+    ctx.fillStyle = "#111815"; ctx.fillRect(50, 100, 400, 400);
+    playerList.forEach((p, index) => {
+        let yOffset = 120 + index * 60;
+        ctx.fillStyle = p.client_id === localId ? "#1e2e27" : "#17201c"; ctx.fillRect(70, yOffset, 360, 45);
+        ctx.fillStyle = "#fff"; ctx.font = "15px sans-serif"; ctx.textBaseline = "alphabetic"; ctx.fillText(p.client_id, 90, yOffset + 27);
+        ctx.font = "11px sans-serif"; ctx.fillStyle = "#ffaa00";
+        if (index === 0) ctx.fillText("[Lobby Leader]", 260, yOffset + 27);
+    });
+
+    if (isLobbyLeader) {
+        ctx.fillStyle = "#16201c"; ctx.fillRect(480, 100, Math.max(350, canvas.width - 530), 400);
+        ctx.fillStyle = "#ffdd66"; ctx.font = "bold 18px sans-serif"; ctx.fillText("SERVER COMMAND MODULE", 510, 140);
+        drawButton("INITIALIZE MATCH START", 510, 430, 240, 45, "#e67e22", "#d35400", () => {
+            mockSocket.send(JSON.stringify({ type: "start_game" }));
+        });
+    }
+}
+
+function drawEntityAura(x, y, angle, role, isFound) {
+    if (isFound) return;
+    if (role !== "sucher") {
+        ctx.save(); ctx.globalCompositeOperation = "screen";
+        const radialGlow = ctx.createRadialGradient(x, y, 2, x, y, 70);
+        radialGlow.addColorStop(0, "rgba(255, 220, 130, 0.25)"); radialGlow.addColorStop(1, "rgba(255, 180, 90, 0.0)");
+        ctx.fillStyle = radialGlow; ctx.beginPath(); ctx.arc(x, y, 70, 0, Math.PI * 2); ctx.fill();
+
+        ctx.beginPath(); ctx.moveTo(x, y); ctx.arc(x, y, 300, angle - 0.38, angle + 0.38); ctx.lineTo(x, y); ctx.closePath();
+        const coneGlow = ctx.createRadialGradient(x, y, 20, x, y, 300);
+        coneGlow.addColorStop(0, "rgba(255, 240, 190, 0.45)"); coneGlow.addColorStop(1, "rgba(200, 160, 100, 0.0)");
+        ctx.fillStyle = coneGlow; ctx.fill(); ctx.restore();
+    } else {
+        ctx.save(); ctx.globalCompositeOperation = "screen";
+        const monsterEyes = ctx.createRadialGradient(x, y, 2, x, y, 140);
+        monsterEyes.addColorStop(0, "rgba(200, 30, 30, 0.2)"); monsterEyes.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.fillStyle = monsterEyes; ctx.beginPath(); ctx.arc(x, y, 140, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+    }
+}
+
+function drawGame() {
+    ctx.fillStyle = "#000000"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    if (!player.isFound) {
+        ctx.save(); ctx.translate(player.x, player.y); ctx.rotate(player.angle);
+        ctx.beginPath(); ctx.arc(0, 0, player.radius, 0, Math.PI * 2);
+        ctx.fillStyle = player.role === "sucher" ? "#b21c1c" : "#8a7500"; ctx.fill(); ctx.restore();
+    }
+
+    remotePlayers.forEach(bot => {
+        if (bot.is_found) return;
+        ctx.save(); ctx.translate(bot.x, bot.y); ctx.rotate(bot.angle);
+        ctx.beginPath(); ctx.arc(0, 0, bot.radius, 0, Math.PI * 2);
+        ctx.fillStyle = bot.role === "sucher" ? "#b21c1c" : "#8a7500"; ctx.fill(); ctx.restore();
+    });
+
+    drawEntityAura(player.x, player.y, player.angle, player.role, player.isFound);
+    remotePlayers.forEach(bot => { drawEntityAura(bot.x, bot.y, bot.angle, bot.role, bot.is_found); });
+
+    if (isGameWinner !== null) {
+        ctx.fillStyle = "rgba(0, 0, 0, 0.85)"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillStyle = "#ff5555"; ctx.font = "bold 40px sans-serif";
+        ctx.fillText(`GAME OVER - WINNER: ${isGameWinner.toUpperCase()}`, canvas.width / 2, canvas.height / 2);
+    }
+}
+
 const keys = {};
 window.addEventListener("keydown", (e) => {
     const key = e.key.toLowerCase();
@@ -63,7 +278,6 @@ window.addEventListener("keydown", (e) => {
 window.addEventListener("keyup", (e) => keys[e.key.toLowerCase()] = false);
 
 const mouse_position = { x: 0, y: 0 };
-let activeButtons = [];
 
 window.addEventListener("mousemove", (e) => {
     const rect = canvas.getBoundingClientRect();
@@ -144,85 +358,6 @@ function update() {
         bot.x = Math.max(bot.radius, Math.min(canvas.width - bot.radius, bot.x));
         bot.y = Math.max(bot.radius, Math.min(canvas.height - bot.radius, bot.y));
     });
-}
-
-function drawButton(text, x, y, w, h, baseColor, hoverColor, callback) {
-    let isHovered = (mouse_position.x >= x && mouse_position.x <= x + w && mouse_position.y >= y && mouse_position.y  {
-        if (usernameInputText.trim().length > 0) {
-            setupMockNetworkRouting();
-            connectToSocket(usernameInputText.trim());
-            gameState = "LOBBY_ROOM";
-        }
-    });
-}
-
-function drawLobbyRoom() {
-    ctx.fillStyle = "#0c1210"; ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.textAlign = "left"; ctx.fillStyle = "#ffdd66"; ctx.font = "bold 28px sans-serif";
-    ctx.fillText("SERVER SIMULATOR ROOM CHANNELS", 50, 60);
-
-    ctx.fillStyle = "#111815"; ctx.fillRect(50, 100, 400, 400);
-    playerList.forEach((p, index) => {
-        let yOffset = 120 + index * 60;
-        ctx.fillStyle = p.client_id === localId ? "#1e2e27" : "#17201c"; ctx.fillRect(70, yOffset, 360, 45);
-        ctx.fillStyle = "#fff"; ctx.font = "15px sans-serif"; ctx.fillText(p.client_id, 90, yOffset + 27);
-        ctx.font = "11px sans-serif"; ctx.fillStyle = "#ffaa00";
-        if (index === 0) ctx.fillText("[Lobby Leader]", 260, yOffset + 27);
-    });
-
-    if (isLobbyLeader) {
-        ctx.fillStyle = "#16201c"; ctx.fillRect(480, 100, Math.max(350, canvas.width - 530), 400);
-        ctx.fillStyle = "#ffdd66"; ctx.font = "bold 18px sans-serif"; ctx.fillText("SERVER COMMAND MODULE", 510, 140);
-        drawButton("INITIALIZE MATCH START", 510, 430, 240, 45, "#e67e22", "#d35400", () => {
-            mockSocket.send(JSON.stringify({ type: "start_game" }));
-        });
-    }
-}
-
-function drawEntityAura(x, y, angle, role, isFound) {
-    if (isFound) return;
-    if (role !== "sucher") {
-        ctx.save(); ctx.globalCompositeOperation = "screen";
-        const radialGlow = ctx.createRadialGradient(x, y, 2, x, y, 70);
-        radialGlow.addColorStop(0, "rgba(255, 220, 130, 0.25)"); radialGlow.addColorStop(1, "rgba(255, 180, 90, 0.0)");
-        ctx.fillStyle = radialGlow; ctx.beginPath(); ctx.arc(x, y, 70, 0, Math.PI * 2); ctx.fill();
-
-        ctx.beginPath(); ctx.moveTo(x, y); ctx.arc(x, y, 300, angle - 0.38, angle + 0.38); ctx.lineTo(x, y); ctx.closePath();
-        const coneGlow = ctx.createRadialGradient(x, y, 20, x, y, 300);
-        coneGlow.addColorStop(0, "rgba(255, 240, 190, 0.45)"); coneGlow.addColorStop(1, "rgba(200, 160, 100, 0.0)");
-        ctx.fillStyle = coneGlow; ctx.fill(); ctx.restore();
-    } else {
-        ctx.save(); ctx.globalCompositeOperation = "screen";
-        const monsterEyes = ctx.createRadialGradient(x, y, 2, x, y, 140);
-        monsterEyes.addColorStop(0, "rgba(200, 30, 30, 0.2)"); monsterEyes.addColorStop(1, "rgba(0,0,0,0)");
-        ctx.fillStyle = monsterEyes; ctx.beginPath(); ctx.arc(x, y, 140, 0, Math.PI * 2); ctx.fill(); ctx.restore();
-    }
-}
-
-function drawGame() {
-    ctx.fillStyle = "#000000"; ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    if (!player.isFound) {
-        ctx.save(); ctx.translate(player.x, player.y); ctx.rotate(player.angle);
-        ctx.beginPath(); ctx.arc(0, 0, player.radius, 0, Math.PI * 2);
-        ctx.fillStyle = player.role === "sucher" ? "#b21c1c" : "#8a7500"; ctx.fill(); ctx.restore();
-    }
-
-    remotePlayers.forEach(bot => {
-        if (bot.is_found) return;
-        ctx.save(); ctx.translate(bot.x, bot.y); ctx.rotate(bot.angle);
-        ctx.beginPath(); ctx.arc(0, 0, bot.radius, 0, Math.PI * 2);
-        ctx.fillStyle = bot.role === "sucher" ? "#b21c1c" : "#8a7500"; ctx.fill(); ctx.restore();
-    });
-
-    drawEntityAura(player.x, player.y, player.angle, player.role, player.isFound);
-    remotePlayers.forEach(bot => { drawEntityAura(bot.x, bot.y, bot.angle, bot.role, bot.is_found); });
-
-    if (isGameWinner !== null) {
-        ctx.fillStyle = "rgba(0, 0, 0, 0.85)"; ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.textAlign = "center"; ctx.fillStyle = "#ff5555"; ctx.font = "bold 40px sans-serif";
-        ctx.fillText(`GAME OVER - WINNER: ${isGameWinner.toUpperCase()}`, canvas.width / 2, canvas.height / 2);
-    }
 }
 
 function gameLoop() {
