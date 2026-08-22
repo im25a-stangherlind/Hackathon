@@ -314,7 +314,8 @@ let loopReq = null;
 el("btnJoin").onclick = () => {
   const name = el("nameInput").value.trim() || ("Spieler"+Math.floor(Math.random()*999));
 
-  ws = new WebSocket(`ws://${window.location.host}`);
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${protocol}//${window.location.host}`);
 
   ws.onopen = () => {
     ws.send(JSON.stringify({ type: "join", name }));
