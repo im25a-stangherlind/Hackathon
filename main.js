@@ -1,266 +1,117 @@
-let canvas = document.getElementById("gameCanvas");
-if (!canvas) {
-    canvas = document.createElement("canvas");
-    canvas.id = "gameCanvas";
-    canvas.width = 800;
-    canvas.height = 600;
-    document.body.appendChild(canvas);
-}
-let ctx = canvas.getContext("2d");
+const canvas = document.getElementById('myCanvas');
+const ctx = canvas.getContext("2d");
 
+// Game States: "START", "LOBBY_SELECT", "LOBBY_ROOM", "PLAYING"
 let gameState = "START";
-let usernameInputText = "";
-let isGameWinner = null;
-let activeButtons = [];
+
+let localId = "";
 let playerList = [];
 let remotePlayers = new Map();
-let localId = null;
-let isLobbyLeader = false;
-let mockSocket = null;
+let mapDecorations = [];
+let isGameWinner = null;
 
-let player = {
-    x: 400,
-    y: 300,
-    radius: 15,
-    speed: 4,
-    angle: 0,
-    role: "verstecker",
-    isFound: false
+const camera = { x: 0, y: 0 };
+const WORLD_SIZE = { width: 2400, height: 1800 };
+
+// Expanded Variant Prop Configs (6 Unique 3D Voxel Assets)
+const PROP_TYPES = {
+    BOX: { baseColor: "#66421e", lidColor: "#80542a", rimColor: "#3d2610", width: 18, height: 18, type: "box", name: "Tiny Crate", thickness: 12 },
+    CANISTER: { baseColor: "#2c3e50", rimColor: "#7f8c8d", topColor: "#1a252f", radius: 8, type: "barrel", name: "Oil Canister", thickness: 16 },
+    MINI_BUSH: { baseColor: "#0f3d12", leafColor: "#1b5e20", radius: 12, type: "bush", name: "Mini Shrub", thickness: 8 },
+    CONE: { baseColor: "#d35400", rimColor: "#f39c12", topColor: "#e67e22", radius: 7, type: "barrel", name: "Safety Cone", thickness: 14 },
+    SAFE: { baseColor: "#34495e", lidColor: "#566573", rimColor: "#1c2833", width: 16, height: 20, type: "safe", name: "Steel Safe", thickness: 18 },
+    PIPE: { baseColor: "#7f8c8d", rimColor: "#95a5a6", topColor: "#34495e", radius: 6, type: "barrel", name: "Industrial Pipe", thickness: 24 }
 };
 
-let serverPlayers = [];
-let serverGameActive = false;
-let serverSeekerId = null;
+const player = {
+    x: 0, y: 0, radius: 14, angle: 0, isDisguised: false, disguiseType: null, role: "hunter",
+    speed: 2.2,
 
-function setupMockNetworkRouting() {
-    if (window.serverInitialized) return;
-    window.serverInitialized = true;
-    serverPlayers = [];
-    serverGameActive = false;
-}
+    // UPDATED: Increased Ammo Limits
+    ammo: 10,
+    maxAmmo: 10,
+    isReloading: false,
+    reloadTimer: 0,
+    RELOAD_DURATION: 45, // 0.75s bolt-lock duration
+    rifleFlashTimer: 0
+};
 
-function connectToSocket(username) {
-    let clientId = username + "_" + Math.floor(Math.random() * 10000);
-    localId = clientId;
-    let isHost = serverPlayers.length === 0;
+let matchTimeLeft = 18000;
+const TOTAL_MATCH_DURATION = 18000;
 
-    serverPlayers.push({
-        id: clientId,
-        name: username,
-        isHost: isHost,
-        role: "verstecker",
-        is_found: false,
-        x: Math.random() * 600 + 100,
-        y: Math.random() * 400 + 100
-    });
+let usernameInputText = "Hunter_" + Math.floor(Math.random() * 900 + 100);
 
-    mockSocket = {
-        send: function(msgString) {
-            let msg = JSON.parse(msgString);
+const mockSocket = {
+    readyState: 1,
+    send: function(jsonString) {
+        const msg = JSON.parse(jsonString);
+        if (msg.type === "start_game") simulateStartGame();
+        if (msg.type === "hider_caught") simulateHiderCaught(msg.target_id);
+    },
+    onmessage: null
+};
 
-            if (msg.type === "start_game") {
-                if (serverPlayers.length >= 2 && !serverGameActive) {
-                    serverGameActive = true;
-                    let randomIndex = Math.floor(Math.random() * serverPlayers.length);
-                    serverSeekerId = serverPlayers[randomIndex].id;
+function resizeCanvas() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+resizeCanvas(); window.addEventListener("resize", resizeCanvas);
 
-                    serverPlayers.forEach(p => {
-                        p.role = (p.id === serverSeekerId) ? "sucher" : "verstecker";
-                        p.is_found = false;
-                    });
-
-                    broadcastMock({ type: "game_started", players: serverPlayers });
-                }
-            } else if (msg.type === "player_found") {
-                let target = serverPlayers.find(p => p.id === msg.target_client);
-                if (target) {
-                    target.is_found = true;
-                    broadcastMock({ type: "update_state", players: serverPlayers });
-
-                    let activeHiders = serverPlayers.filter(p => p.role === "verstecker" && !p.is_found);
-                    if (activeHiders.length === 0) {
-                        serverGameActive = false;
-                        broadcastMock({ type: "game_over", winner: "sucher" });
-                    }
-                }
-            }
-        }
-    };
-
-    if (serverGameActive) {
-        let p = serverPlayers.find(p => p.id === clientId);
-        if (p) p.role = "verstecker";
-        broadcastMock({ type: "game_started", players: serverPlayers });
-    } else {
-        broadcastMock({ type: "lobby_update", players: serverPlayers });
-    }
-}
-
-function broadcastMock(data) {
-    setTimeout(() => {
-        if (data.type === "lobby_update") {
-            playerList = data.players.map(p => ({ client_id: p.name, id: p.id }));
-            let me = data.players.find(p => p.id === localId);
-            if (me) isLobbyLeader = me.isHost;
-        } else if (data.type === "game_started" || data.type === "update_state") {
-            gameState = "PLAYING";
-            let me = data.players.find(p => p.id === localId);
-            if (me) {
-                player.role = me.role;
-                player.isFound = me.is_found;
-            }
-
-            remotePlayers.clear();
-            data.players.forEach(p => {
-                if (p.id !== localId) {
-                    remotePlayers.set(p.id, {
-                        client_id: p.id,
-                        role: p.role,
-                        is_found: p.is_found,
-                        x: p.x,
-                        y: p.y,
-                        radius: 15,
-                        speed: 4,
-                        angle: 0,
-                        changeDirTimer: 0
-                    });
-                }
-            });
-        } else if (data.type === "game_over") {
-            isGameWinner = data.winner;
-        }
-    }, 20);
-}
-
-function drawStartScreen() {
-    ctx.fillStyle = "#0a0f0d";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = "#ffdd66";
-    ctx.font = "bold 32px sans-serif";
-    ctx.textAlign = "center";
-    ctx.fillText("HIDE AND SEEK PROTOKOLL", canvas.width / 2, canvas.height / 2 - 20);
-    ctx.fillStyle = "rgba(255,255,255,0.6)";
-    ctx.font = "16px sans-serif";
-    ctx.fillText("Drücke LEERTASTE um zu starten", canvas.width / 2, canvas.height / 2 + 20);
-}
-
-function drawButton(text, x, y, w, h, baseColor, hoverColor, callback) {
-    // FIXED: Completed the missing comparative coordinate equation
-    let isHovered = (mouse_position.x >= x && mouse_position.x <= x + w &&
-        mouse_position.y >= y && mouse_position.y <= y + h);
-
-    ctx.fillStyle = isHovered ? hoverColor : baseColor;
-    ctx.fillRect(x, y, w, h);
-    ctx.strokeStyle = "#222";
-    ctx.strokeRect(x, y, w, h);
-
-    ctx.fillStyle = "#fff";
-    ctx.font = "14px sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(text, x + w / 2, y + h / 2);
-
-    activeButtons.push({ x, y, w, h, callback });
-}
-
-function drawLobbySelect() {
-    ctx.fillStyle = "#0a0f0d";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.textAlign = "left";
-    ctx.fillStyle = "#ffdd66";
-    ctx.font = "bold 32px sans-serif";
-    ctx.fillText("OFFLINE SIMULATED MULTIPLAYER", 50, 60);
-
-    ctx.fillStyle = "rgba(255,255,255,0.6)";
-    ctx.font = "16px sans-serif";
-    ctx.fillText("Type your local player identity name identifier:", 50, 140);
-
-    ctx.fillStyle = "#161b18";
-    ctx.fillRect(50, 170, 300, 45);
-    ctx.strokeStyle = "#333";
-    ctx.strokeRect(50, 170, 300, 45);
-
-    ctx.fillStyle = "#fff";
-    ctx.font = "16px sans-serif";
-    let cursor = (Math.floor(Date.now() / 500) % 2 === 0 ? "_" : "");
-    ctx.fillText(usernameInputText + cursor, 65, 193);
-
-    // FIXED: Properly calling drawButton inside the UI loop layout context
-    drawButton("CONNECT TO LOCAL SERVER", 50, 240, 240, 45, "#1a5e22", "#2e8b37", () => {
-        if (usernameInputText.trim().length > 0) {
-            setupMockNetworkRouting();
-            connectToSocket(usernameInputText.trim());
-            gameState = "LOBBY_ROOM";
-        }
-    });
-}
-
-function drawLobbyRoom() {
-    ctx.fillStyle = "#0c1210"; ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.textAlign = "left"; ctx.fillStyle = "#ffdd66"; ctx.font = "bold 28px sans-serif";
-    ctx.fillText("SERVER SIMULATOR ROOM CHANNELS", 50, 60);
-
-    ctx.fillStyle = "#111815"; ctx.fillRect(50, 100, 400, 400);
-    playerList.forEach((p, index) => {
-        let yOffset = 120 + index * 60;
-        ctx.fillStyle = p.client_id === localId ? "#1e2e27" : "#17201c"; ctx.fillRect(70, yOffset, 360, 45);
-        ctx.fillStyle = "#fff"; ctx.font = "15px sans-serif"; ctx.textBaseline = "alphabetic"; ctx.fillText(p.client_id, 90, yOffset + 27);
-        ctx.font = "11px sans-serif"; ctx.fillStyle = "#ffaa00";
-        if (index === 0) ctx.fillText("[Lobby Leader]", 260, yOffset + 27);
-    });
-
-    if (isLobbyLeader) {
-        ctx.fillStyle = "#16201c"; ctx.fillRect(480, 100, Math.max(350, canvas.width - 530), 400);
-        ctx.fillStyle = "#ffdd66"; ctx.font = "bold 18px sans-serif"; ctx.fillText("SERVER COMMAND MODULE", 510, 140);
-        drawButton("INITIALIZE MATCH START", 510, 430, 240, 45, "#e67e22", "#d35400", () => {
-            mockSocket.send(JSON.stringify({ type: "start_game" }));
+function generateMapProps() {
+    mapDecorations = [];
+    const types = Object.values(PROP_TYPES);
+    // Crowding 180 total diverse 3D objects over the expanded world grid space
+    for (let i = 0; i < 180; i++) {
+        mapDecorations.push({
+            x: Math.random() * (WORLD_SIZE.width - 150) + 75,
+            y: Math.random() * (WORLD_SIZE.height - 150) + 75,
+            propInfo: types[Math.floor(Math.random() * types.length)]
         });
     }
 }
 
-function drawEntityAura(x, y, angle, role, isFound) {
-    if (isFound) return;
-    if (role !== "sucher") {
-        ctx.save(); ctx.globalCompositeOperation = "screen";
-        const radialGlow = ctx.createRadialGradient(x, y, 2, x, y, 70);
-        radialGlow.addColorStop(0, "rgba(255, 220, 130, 0.25)"); radialGlow.addColorStop(1, "rgba(255, 180, 90, 0.0)");
-        ctx.fillStyle = radialGlow; ctx.beginPath(); ctx.arc(x, y, 70, 0, Math.PI * 2); ctx.fill();
-
-        ctx.beginPath(); ctx.moveTo(x, y); ctx.arc(x, y, 300, angle - 0.38, angle + 0.38); ctx.lineTo(x, y); ctx.closePath();
-        const coneGlow = ctx.createRadialGradient(x, y, 20, x, y, 300);
-        coneGlow.addColorStop(0, "rgba(255, 240, 190, 0.45)"); coneGlow.addColorStop(1, "rgba(200, 160, 100, 0.0)");
-        ctx.fillStyle = coneGlow; ctx.fill(); ctx.restore();
-    } else {
-        ctx.save(); ctx.globalCompositeOperation = "screen";
-        const monsterEyes = ctx.createRadialGradient(x, y, 2, x, y, 140);
-        monsterEyes.addColorStop(0, "rgba(200, 30, 30, 0.2)"); monsterEyes.addColorStop(1, "rgba(0,0,0,0)");
-        ctx.fillStyle = monsterEyes; ctx.beginPath(); ctx.arc(x, y, 140, 0, Math.PI * 2); ctx.fill(); ctx.restore();
-    }
+function connectToSocket(clientId) {
+    localId = clientId;
+    playerList = [
+        { client_id: localId, role: "hunter", is_found: false },
+        { client_id: "Bot_Echo", role: "prop", is_found: false },
+        { client_id: "Bot_Viper", role: "prop", is_found: false },
+        { client_id: "Bot_Stalker", role: "prop", is_found: false }
+    ];
+    setTimeout(() => { triggerNetworkMessage({ type: "player_list_update", players: playerList }); }, 100);
 }
 
-function drawGame() {
-    ctx.fillStyle = "#000000"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+function simulateStartGame() {
+    generateMapProps();
+    isGameWinner = null;
+    matchTimeLeft = TOTAL_MATCH_DURATION;
+    player.x = WORLD_SIZE.width / 2; player.y = WORLD_SIZE.height / 2;
+    player.role = "hunter"; player.ammo = player.maxAmmo;
 
-    if (!player.isFound) {
-        ctx.save(); ctx.translate(player.x, player.y); ctx.rotate(player.angle);
-        ctx.beginPath(); ctx.arc(0, 0, player.radius, 0, Math.PI * 2);
-        ctx.fillStyle = player.role === "sucher" ? "#b21c1c" : "#8a7500"; ctx.fill(); ctx.restore();
-    }
+    remotePlayers.clear();
+    const types = Object.values(PROP_TYPES);
 
-    remotePlayers.forEach(bot => {
-        if (bot.is_found) return;
-        ctx.save(); ctx.translate(bot.x, bot.y); ctx.rotate(bot.angle);
-        ctx.beginPath(); ctx.arc(0, 0, bot.radius, 0, Math.PI * 2);
-        ctx.fillStyle = bot.role === "sucher" ? "#b21c1c" : "#8a7500"; ctx.fill(); ctx.restore();
+    playerList.forEach(p => {
+        if (p.client_id !== localId) {
+            remotePlayers.set(p.client_id, {
+                client_id: p.client_id,
+                x: Math.random() * (WORLD_SIZE.width - 400) + 200,
+                y: Math.random() * (WORLD_SIZE.height - 400) + 200,
+                angle: Math.random() * Math.PI * 2,
+                speed: 0,
+                role: "prop", isDisguised: true, is_found: false,
+                disguiseType: types[Math.floor(Math.random() * types.length)]
+            });
+        }
     });
+    gameState = "PLAYING"; triggerNetworkMessage({ type: "game_started" });
+}
 
-    drawEntityAura(player.x, player.y, player.angle, player.role, player.isFound);
-    remotePlayers.forEach(bot => { drawEntityAura(bot.x, bot.y, bot.angle, bot.role, bot.is_found); });
+function simulateHiderCaught(targetId) {
+    let match = playerList.find(p => p.client_id === targetId);
+    if (match && !match.is_found) {
+        match.is_found = true;
+        if (remotePlayers.has(targetId)) remotePlayers.get(targetId).is_found = true;
 
-    if (isGameWinner !== null) {
-        ctx.fillStyle = "rgba(0, 0, 0, 0.85)"; ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillStyle = "#ff5555"; ctx.font = "bold 40px sans-serif";
-        ctx.fillText(`GAME OVER - WINNER: ${isGameWinner.toUpperCase()}`, canvas.width / 2, canvas.height / 2);
+        let remainingHiders = playerList.filter(p => p.role === "prop" && !p.is_found).length;
+        if (remainingHiders === 0) isGameWinner = "HUNTERS";
     }
 }
 
@@ -277,18 +128,44 @@ window.addEventListener("keydown", (e) => {
 });
 window.addEventListener("keyup", (e) => keys[e.key.toLowerCase()] = false);
 
-const mouse_position = { x: 0, y: 0 };
-
+const mouse_position = { x: 0, y: 0 }; let activeButtons = [];
 window.addEventListener("mousemove", (e) => {
     const rect = canvas.getBoundingClientRect();
-    mouse_position.x = e.clientX - rect.left;
-    mouse_position.y = e.clientY - rect.top;
+    mouse_position.x = e.clientX - rect.left; mouse_position.y = e.clientY - rect.top;
 });
 
 window.addEventListener("click", () => {
     for (let btn of activeButtons) {
         if (mouse_position.x >= btn.x && mouse_position.x <= btn.x + btn.w && mouse_position.y >= btn.y && mouse_position.y <= btn.y + btn.h) {
-            btn.callback(); break;
+            btn.callback(); return;
+        }
+    }
+
+    if (gameState !== "PLAYING" || isGameWinner !== null) return;
+
+    if (player.role === "hunter" && !player.isReloading && player.ammo > 0) {
+        player.ammo--;
+        player.rifleFlashTimer = 6; player.isReloading = true;
+        player.reloadTimer = player.RELOAD_DURATION;
+
+        let maxRange = 500;
+        let lx = player.x; let ly = player.y;
+        let ex = player.x + Math.cos(player.angle) * maxRange; let ey = player.y + Math.sin(player.angle) * maxRange;
+
+        remotePlayers.forEach((bot, botId) => {
+            if (bot.is_found) return;
+            let A = ex - lx; let B = ey - ly; let lenSq = A * A + B * B;
+            let u = Math.max(0, Math.min(1, ((bot.x - lx) * A + (bot.y - ly) * B) / lenSq));
+            let dist = Math.hypot(bot.x - (lx + u * A), bot.y - (ly + u * B));
+
+            if (dist < bot.radius + 6) {
+                mockSocket.send(JSON.stringify({ type: "hider_caught", target_id: botId }));
+            }
+        });
+
+        if (player.ammo === 0 && isGameWinner === null) {
+            let uncaughtHiders = playerList.filter(p => p.role === "prop" && !p.is_found).length;
+            if (uncaughtHiders > 0) isGameWinner = "PROPS (HUNTER OUT OF AMMO)";
         }
     }
 });
@@ -296,70 +173,192 @@ window.addEventListener("click", () => {
 function update() {
     if (gameState !== "PLAYING" || isGameWinner !== null) return;
 
+    if (player.rifleFlashTimer > 0) player.rifleFlashTimer--;
+    if (player.isReloading) {
+        player.reloadTimer--; if (player.reloadTimer <= 0) player.isReloading = false;
+    }
+
+    matchTimeLeft--;
+    if (matchTimeLeft <= 0) {
+        matchTimeLeft = 0;
+        isGameWinner = "PROPS (TIME EXPIRED)";
+    }
+
     let moveX = 0, moveY = 0;
-    if (keys["w"] || keys["arrowup"]) moveY -= 1;
-    if (keys["s"] || keys["arrowdown"]) moveY += 1;
-    if (keys["a"] || keys["arrowleft"]) moveX -= 1;
-    if (keys["d"] || keys["arrowright"]) moveX += 1;
+    if (keys["w"] || keys["arrowup"]) moveY -= 1; if (keys["s"] || keys["arrowdown"]) moveY += 1;
+    if (keys["a"] || keys["arrowleft"]) moveX -= 1; if (keys["d"] || keys["arrowright"]) moveX += 1;
 
     if (moveX !== 0 && moveY !== 0) { moveX *= Math.SQRT1_2; moveY *= Math.SQRT1_2; }
 
     player.x += moveX * player.speed; player.y += moveY * player.speed;
-    player.x = Math.max(player.radius, Math.min(canvas.width - player.radius, player.x));
-    player.y = Math.max(player.radius, Math.min(canvas.height - player.radius, player.y));
-    player.angle = Math.atan2(mouse_position.y - player.y, mouse_position.x - player.x);
+    player.x = Math.max(player.radius, Math.min(WORLD_SIZE.width - player.radius, player.x));
+    player.y = Math.max(player.radius, Math.min(WORLD_SIZE.height - player.radius, player.y));
 
-    if (player.role === "sucher" && !player.isFound) {
-        remotePlayers.forEach((bot, botId) => {
-            if (bot.role === "verstecker" && !bot.is_found) {
-                if (Math.hypot(player.x - bot.x, player.y - bot.y) < player.radius + bot.radius) {
-                    mockSocket.send(JSON.stringify({ type: "player_found", target_client: botId }));
-                }
-            }
-        });
-    }
+    camera.x = player.x - (canvas.width / 2) / 1.7; camera.y = player.y - (canvas.height / 2) / 1.7;
 
-    remotePlayers.forEach(bot => {
-        if (bot.is_found) return;
-
-        if (bot.role === "sucher") {
-            let targetEntity = (!player.isFound) ? player : null;
-            let minDist = targetEntity ? Math.hypot(targetEntity.x - bot.x, targetEntity.y - bot.y) : Infinity;
-
-            remotePlayers.forEach(other => {
-                if (other.role === "verstecker" && !other.is_found) {
-                    let d = Math.hypot(other.x - bot.x, other.y - bot.y);
-                    if (d < minDist) { minDist = d; targetEntity = other; }
-                }
-            });
-
-            if (targetEntity) {
-                bot.angle = Math.atan2(targetEntity.y - bot.y, targetEntity.x - bot.x);
-                bot.x += Math.cos(bot.angle) * bot.speed; bot.y += Math.sin(bot.angle) * bot.speed;
-
-                if (Math.hypot(targetEntity.x - bot.x, targetEntity.y - bot.y) < bot.radius + targetEntity.radius) {
-                    let targetId = (targetEntity === player) ? localId : targetEntity.client_id;
-                    mockSocket.send(JSON.stringify({ type: "player_found", target_client: targetId }));
-                }
-            }
-        } else {
-            bot.changeDirTimer--;
-            if (bot.changeDirTimer <= 0) {
-                bot.targetX = Math.random() * (canvas.width - 100) + 50;
-                bot.targetY = Math.random() * (canvas.height - 100) + 50;
-                bot.changeDirTimer = Math.floor(Math.random() * 120) + 60;
-            }
-            let dx = bot.targetX - bot.x, dy = bot.targetY - bot.y;
-            if (Math.hypot(dx, dy) > 5) {
-                bot.angle = Math.atan2(dy, dx);
-                bot.x += Math.cos(bot.angle) * bot.speed; bot.y += Math.sin(bot.angle) * bot.speed;
-            }
-        }
-        bot.x = Math.max(bot.radius, Math.min(canvas.width - bot.radius, bot.x));
-        bot.y = Math.max(bot.radius, Math.min(canvas.height - bot.radius, bot.y));
-    });
+    let worldMouseX = (mouse_position.x / 1.7) + camera.x;
+    let worldMouseY = (mouse_position.y / 1.7) + camera.y;
+    player.angle = Math.atan2(worldMouseY - player.y, worldMouseX - player.x);
 }
 
+function drawHighDetail3DProp(x, y, propInfo) {
+    ctx.save(); ctx.fillStyle = "rgba(0,0,0,0.22)"; ctx.beginPath();
+    ctx.arc(x, y + 1, propInfo.radius || propInfo.width / 1.3, 0, Math.PI * 2); ctx.fill();
+
+    for (let i = 0; i < propInfo.thickness; i++) {
+        let drawY = y - i; let isTopLayer = (i === propInfo.thickness - 1);
+
+        if (propInfo.type === "box") {
+            ctx.fillStyle = isTopLayer ? propInfo.lidColor : propInfo.baseColor;
+            ctx.fillRect(x - propInfo.width / 2, drawY - propInfo.height / 2, propInfo.width, propInfo.height);
+
+            // Render wooden panel reinforcing edges
+            if (i < 2 || i > propInfo.thickness - 3 || isTopLayer) {
+                ctx.fillStyle = propInfo.rimColor;
+                ctx.fillRect(x - propInfo.width / 2, drawY - propInfo.height / 2, propInfo.width, 2);
+            }
+            // UPDATED: Render structural X-shaped bracing cross struts on the topmost layer
+            if (isTopLayer) {
+                ctx.strokeStyle = propInfo.rimColor; ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(x - propInfo.width / 2 + 2, drawY - propInfo.height / 2 + 2);
+                ctx.lineTo(x + propInfo.width / 2 - 2, drawY + propInfo.height / 2 - 2);
+                ctx.moveTo(x + propInfo.width / 2 - 2, drawY - propInfo.height / 2 + 2);
+                ctx.lineTo(x - propInfo.width / 2 + 2, drawY + propInfo.height / 2 - 2);
+                ctx.stroke();
+            }
+        } else if (propInfo.type === "safe") {
+            // STEEL SAFE LAYER DRAW: Draws a geometric box with a distinct inner vault door dial wheel
+            ctx.fillStyle = isTopLayer ? propInfo.lidColor : propInfo.baseColor;
+            ctx.fillRect(x - propInfo.width / 2, drawY - propInfo.height / 2, propInfo.width, propInfo.height);
+            if (isTopLayer) {
+                ctx.fillStyle = propInfo.rimColor;
+                ctx.beginPath(); ctx.arc(x - 2, drawY, 3, 0, Math.PI * 2); ctx.fill(); // Dial knob lock mechanism
+                ctx.fillRect(x + 3, drawY - 4, 2, 8); // Safe handle latch line
+            }
+        } else if (propInfo.type === "barrel") {
+            ctx.fillStyle = (i === 4 || i === 10) ? propInfo.rimColor : propInfo.baseColor;
+            if (isTopLayer) ctx.fillStyle = propInfo.topColor;
+            ctx.beginPath(); ctx.arc(x, drawY, propInfo.radius, 0, Math.PI * 2); ctx.fill();
+        } else if (propInfo.type === "bush") {
+            ctx.fillStyle = isTopLayer ? propInfo.leafColor : propInfo.baseColor;
+            ctx.beginPath(); ctx.arc(x, drawY, propInfo.radius, 0, Math.PI * 2); ctx.fill();
+        }
+    }
+    ctx.restore();
+}
+
+function drawGame() {
+    ctx.save(); ctx.scale(1.7, 1.7);
+    ctx.fillStyle = "#1e2226"; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.fillStyle = "#252a30";
+
+    let startGridX = Math.floor(camera.x / 60) * 60; let startGridY = Math.floor(camera.y / 60) * 60;
+    for (let x = startGridX - 60; x < startGridX + (canvas.width / 1.7) + 60; x += 60) ctx.fillRect(x - camera.x, 0, 1.5, canvas.height);
+    for (let y = startGridY - 60; y < startGridY + (canvas.height / 1.7) + 60; y += 60) ctx.fillRect(0, y - camera.y, canvas.width, 1.5);
+
+    // NEW: ADVANTAGE MECHANIC - Laser Sight Guidance Path (Drawn beneath entities)
+    if (player.role === "hunter" && !player.isReloading && player.ammo > 0 && isGameWinner === null) {
+        ctx.save(); ctx.strokeStyle = "rgba(255, 50, 50, 0.25)"; ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]); // Clean red dotted guidance trajectory line
+        ctx.beginPath(); ctx.moveTo(player.x - camera.x, player.y - camera.y);
+        ctx.lineTo((player.x + Math.cos(player.angle) * 500) - camera.x, (player.y + Math.sin(player.angle) * 500) - camera.y);
+        ctx.stroke(); ctx.restore();
+    }
+
+    let renderQueue = [];
+    mapDecorations.forEach(p => renderQueue.push({ type: "prop", worldX: p.x, worldY: p.y, propInfo: p.propInfo }));
+    renderQueue.push({ type: "player_norm", worldX: player.x, worldY: player.y, angle: player.angle, radius: player.radius });
+    remotePlayers.forEach(bot => { if (!bot.is_found) renderQueue.push({ type: "bot_disg", worldX: bot.x, worldY: bot.y, disguiseType: bot.disguiseType }); });
+
+    renderQueue.sort((a, b) => a.worldY - b.worldY);
+    renderQueue.forEach(item => {
+        let screenX = item.worldX - camera.x; let screenY = item.worldY - camera.y;
+        if (screenX < -60 || screenX > (canvas.width / 1.7) + 60 || screenY < -60 || screenY > (canvas.height / 1.7) + 60) return;
+
+        if (item.type === "prop") drawHighDetail3DProp(screenX, screenY, item.propInfo);
+        if (item.type === "bot_disg") drawHighDetail3DProp(screenX, screenY, item.disguiseType);
+        if (item.type === "player_norm") {
+            ctx.save(); ctx.translate(screenX, screenY); ctx.rotate(item.angle);
+            ctx.beginPath(); ctx.arc(0, 0, item.radius, 0, Math.PI * 2);
+            ctx.fillStyle = "#3498db"; ctx.fill(); ctx.strokeStyle = "#111"; ctx.lineWidth = 1.5; ctx.stroke();
+            ctx.fillStyle = "#fff"; ctx.fillRect(4, -3, 5, 2); ctx.fillRect(4, 1, 5, 2);
+            ctx.fillStyle = "#555"; ctx.fillRect(2, -1, 24, 2.5); ctx.restore();
+
+            if (player.rifleFlashTimer > 0) {
+                ctx.save(); ctx.globalCompositeOperation = "screen";
+                ctx.strokeStyle = "rgba(255, 220, 100, 0.9)"; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(screenX, screenY);
+                ctx.lineTo(screenX + Math.cos(item.angle) * 500, screenY + Math.sin(item.angle) * 500); ctx.stroke(); ctx.restore();
+            }
+            if (player.isReloading) {
+                ctx.save(); let barW = 32; let barH = 4; let pct = (player.RELOAD_DURATION - player.reloadTimer) / player.RELOAD_DURATION;
+                ctx.fillStyle = "rgba(0,0,0,0.5)"; ctx.fillRect(screenX - barW / 2, screenY + 20, barW, barH);
+                ctx.fillStyle = "#ffdd66"; ctx.fillRect(screenX - barW / 2, screenY + 20, barW * pct, barH); ctx.restore();
+            }
+        }
+    });
+    ctx.restore();
+
+    let totalSeconds = Math.ceil(matchTimeLeft / 60);
+    let displayMins = Math.floor(totalSeconds / 60);
+    let displaySecs = totalSeconds % 60;
+    let formattedTime = `${displayMins}:${displaySecs < 10 ? "0" : ""}${displaySecs}`;
+
+    ctx.fillStyle = "rgba(255,255,255,0.85)"; ctx.font = "bold 14px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(`AMMO: ${player.ammo}/${player.maxAmmo}   |   TIME REMAINING: ${formattedTime}`, canvas.width / 2, canvas.height - 40);
+
+    if (isGameWinner !== null) {
+        ctx.fillStyle = "rgba(10, 15, 20, 0.92)"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        ctx.fillStyle = isGameWinner.includes("HUNTERS") ? "#2ecc71" : "#ff5555"; ctx.font = "bold 44px sans-serif";
+        ctx.fillText("MATCH CONCLUDED", canvas.width / 2, canvas.height / 2 - 80);
+        ctx.fillStyle = "#ffffff"; ctx.font = "20px sans-serif";
+        ctx.fillText(`WINNER: ${isGameWinner}`, canvas.width / 2, canvas.height / 2 - 20);
+
+        drawButton("PLAY AGAIN", canvas.width / 2 - 110, canvas.height / 2 + 40, 220, 45, "#2980b9", "#3498db", () => {
+            gameState = "LOBBY_ROOM"; isGameWinner = null;
+        });
+    }
+}
+
+function triggerNetworkMessage(payload) { if (mockSocket.onmessage) mockSocket.onmessage({ data: JSON.stringify(payload) }); }
+function setupMockNetworkRouting() {
+    mockSocket.onmessage = (event) => {
+        const msg = JSON.parse(event.data); if (msg.type === "player_list_update") playerList = msg.players;
+        if (msg.type === "game_started") { gameState = "PLAYING"; }
+    };
+}
+function drawButton(text, x, y, w, h, baseColor, hoverColor, callback) {
+    let isHovered = (mouse_position.x >= x && mouse_position.x <= x + w && mouse_position.y >= y && mouse_position.y <= y + h);
+    ctx.fillStyle = isHovered ? hoverColor : baseColor; ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = "#111"; ctx.strokeRect(x, y, w, h);
+    ctx.fillStyle = "#fff"; ctx.font = "14px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(text, x + w / 2, y + h / 2);
+    activeButtons.push({ x, y, w, h, callback });
+}
+function drawStartScreen() {
+    ctx.fillStyle = "#111215"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillStyle = "#3498db"; ctx.font = "bold 48px sans-serif"; ctx.fillText("LASER SIGHT 3D PROP HUNTER", canvas.width / 2, canvas.height / 2 - 60);
+    const alpha = 0.4 + Math.abs(Math.sin(Date.now() * 0.003)) * 0.6; ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`; ctx.font = "20px sans-serif"; ctx.fillText("PRESS SPACE OR ENTER TO CHOOSE ID", canvas.width / 2, canvas.height / 2 + 20);
+}
+function drawLobbySelect() {
+    ctx.fillStyle = "#111215"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.textAlign = "left"; ctx.fillStyle = "#3498db"; ctx.font = "bold 32px sans-serif"; ctx.fillText("HUNTER MATCHMAKING", 50, 60);
+    ctx.fillStyle = "rgba(255,255,255,0.6)"; ctx.font = "16px sans-serif"; ctx.fillText("Enter hunter operative handle tag:", 50, 140);
+    ctx.fillStyle = "#1c1e22"; ctx.fillRect(50, 170, 300, 45); ctx.strokeStyle = "#333"; ctx.strokeRect(50, 170, 300, 45);
+    ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif"; ctx.fillText(usernameInputText + (Math.floor(Date.now() / 500) % 2 === 0 ? "_" : ""), 65, 193);
+    drawButton("ENTER LOBBY INSTANCE", 50, 240, 240, 45, "#2980b9", "#3498db", () => {
+        if (usernameInputText.trim().length > 0) { setupMockNetworkRouting(); connectToSocket(usernameInputText.trim()); gameState = "LOBBY_ROOM"; }
+    });
+}
+function drawLobbyRoom() {
+    ctx.fillStyle = "#111215"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.textAlign = "left"; ctx.fillStyle = "#3498db"; ctx.font = "bold 28px sans-serif"; ctx.fillText("GAME LOBBY ROOM", 50, 60);
+    ctx.fillStyle = "#1c1e22"; ctx.fillRect(50, 100, 400, 400);
+    playerList.forEach((p, idx) => {
+        let y = 120 + idx * 60; ctx.fillStyle = p.client_id === localId ? "#2c3e50" : "#252830"; ctx.fillRect(70, y, 360, 45);
+        ctx.fillStyle = "#fff"; ctx.font = "15px sans-serif"; ctx.fillText(p.client_id, 90, y + 27);
+    });
+    drawButton("START HUNT MATCH", 480, 100, 220, 45, "#27ae60", "#2ecc71", () => { mockSocket.send(JSON.stringify({ type: "start_game" })); });
+}
 function gameLoop() {
     activeButtons = []; update();
     if (gameState === "START") drawStartScreen();
