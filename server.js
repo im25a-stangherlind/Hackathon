@@ -1,9 +1,3 @@
-// server.js
-// Lokaler Hide-and-Seek Multiplayer-Server. Läuft komplett offline im eigenen WLAN.
-// Start:  npm install ws
-//         node server.js
-// Andere Spieler öffnen dann im Browser die Adresse, die im Terminal angezeigt wird.
-
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
@@ -14,79 +8,63 @@ const PORT = 3000;
 const MAX_PLAYERS = 15;
 
 let players = [];
-let status = "lobby";
+let status = "LOBBY";
 let winner = null;
 let nextId = 1;
+let gameStartTime = 0;
 
-let startedAt = 0;
-const hidingDur = 12000;
-const huntDur = 120000;
-
-function hostId() {
-  return players.length > 0 ? players[0].id : null;
-}
+function hostId() { return players.length > 0 ? players[0].id : null; }
 
 function publicPlayers() {
   return players.map(p => ({
-    id: p.id, name: p.name, x: p.x, y: p.y,
-    role: p.role, hidden: p.hidden, propType: p.propType, alive: p.alive
+    id: p.id, name: p.name, x: p.x, y: p.y, angle: p.angle,
+    role: p.role, isFound: p.isFound
   }));
 }
 
 function broadcastState() {
-  const payload = JSON.stringify({
-    type: "state",
-    status, winner,
-    hostId: hostId(),
-    startedAt, hidingDur, huntDur,
-    players: publicPlayers()
-  });
-  players.forEach(p => {
-    if (p.ws.readyState === WebSocket.OPEN) p.ws.send(payload);
-  });
+  const payload = JSON.stringify({ type: "state", status, winner, hostId: hostId(), gameStartTime, players: publicPlayers() });
+  players.forEach(p => { if (p.ws.readyState === WebSocket.OPEN) p.ws.send(payload); });
 }
 
 function resetToLobby() {
-  status = "lobby";
-  winner = null;
-  players.forEach(p => {
-    p.role = "prop";
-    p.alive = true;
-    p.hidden = false;
-    p.propType = null;
-  });
+  status = "LOBBY"; winner = null;
+  players.forEach(p => { p.role = "verstecker"; p.isFound = false; });
 }
 
 function checkWinCondition() {
-  if (status !== "hunting") return;
-  const activeProps = players.filter(p => p.role === "prop" && p.alive);
-  if (activeProps.length === 0) {
-    winner = "hunter";
-    status = "ended";
-    broadcastState();
-  }
+  if (status !== "PLAYING") return;
+  const activeHiders = players.filter(p => p.role === "verstecker" && !p.isFound);
+  if (activeHiders.length === 0) winner = "sucher";
 }
 
-setInterval(() => {
-  if (status === "hiding") {
-    if (Date.now() - startedAt > hidingDur) {
-      status = "hunting";
-      broadcastState();
-    }
-  } else if (status === "hunting") {
-    if (Date.now() - startedAt > hidingDur + huntDur) {
-      status = "ended";
-      winner = "props";
-      broadcastState();
-    }
-  }
-}, 500);
-
-const indexHtml = fs.readFileSync(path.join(__dirname, "public", "index.html"));
-
 const server = http.createServer((req, res) => {
-  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-  res.end(indexHtml);
+  let reqUrl = req.url === "/" ? "/index.html" : req.url;
+  let filePath = path.join(__dirname, "public", reqUrl);
+  let extname = path.extname(filePath).toLowerCase();
+
+  let mimeTypes = {
+    '.html': 'text/html',
+    '.js': 'text/javascript',
+    '.css': 'text/css',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg'
+  };
+  let contentType = mimeTypes[extname] || 'application/octet-stream';
+
+  fs.readFile(filePath, (err, content) => {
+    if (err) {
+      if (err.code === "ENOENT") {
+        res.writeHead(404); res.end("File not found");
+      } else {
+        res.writeHead(500); res.end("Server Error");
+      }
+    } else {
+      res.writeHead(200, { "Content-Type": contentType });
+      res.end(content, "utf-8");
+    }
+  });
 });
 
 const wss = new WebSocket.Server({ server });
@@ -101,14 +79,14 @@ wss.on("connection", (ws) => {
     if (msg.type === "join") {
       if (players.length >= MAX_PLAYERS) {
         ws.send(JSON.stringify({ type: "join_rejected", reason: "full" }));
-        ws.close();
-        return;
+        ws.close(); return;
       }
       const name = (msg.name || "Spieler").toString().slice(0, 20) || "Spieler";
       me = {
         id: nextId++, ws, name,
-        x: 0, y: 0, role: "prop",
-        hidden: false, propType: null, alive: true
+        x: 1904, y: 2728,
+        angle: 0,
+        role: "verstecker", isFound: false
       };
       players.push(me);
       ws.send(JSON.stringify({ type: "joined", id: me.id }));
@@ -119,71 +97,56 @@ wss.on("connection", (ws) => {
     if (!me) return;
 
     if (msg.type === "start_game") {
-      if (me.id !== hostId() || status !== "lobby" || players.length < 2) return;
-
+      if (me.id !== hostId() || status !== "LOBBY" || players.length < 2) return;
       const seekerIndex = Math.floor(Math.random() * players.length);
+
+      gameStartTime = Date.now();
+
       players.forEach((p, i) => {
-        p.role = i === seekerIndex ? "hunter" : "prop";
-        p.alive = true;
-        p.hidden = false;
-        p.propType = null;
+        p.role = i === seekerIndex ? "sucher" : "verstecker";
+        p.isFound = false;
+        p.x = 1904;
+        p.y = 2728;
       });
 
-      status = "hiding";
-      winner = null;
-      startedAt = Date.now();
-      broadcastState();
-      return;
+      status = "PLAYING"; winner = null;
+      broadcastState(); return;
     }
 
     if (msg.type === "move") {
-      if (status === "ended" || !me.alive) return;
-      me.x = Number(msg.x) || me.x;
-      me.y = Number(msg.y) || me.y;
-      me.hidden = Boolean(msg.hidden);
-      me.propType = msg.propType || null;
-      broadcastState();
-      return;
+      if (status !== "PLAYING" && status !== "LOBBY") return;
+      if (me.isFound) return;
+
+      me.x = typeof msg.x === "number" ? msg.x : me.x;
+      me.y = typeof msg.y === "number" ? msg.y : me.y;
+      me.angle = typeof msg.angle === "number" ? msg.angle : 0;
+
+      broadcastState(); return;
     }
 
-    if (msg.type === "tag") {
-      if (status !== "hunting" || me.role !== "hunter") return;
+    if (msg.type === "found") {
+      if (status !== "PLAYING" || me.role !== "sucher") return;
       const target = players.find(p => p.id === msg.targetId);
-      if (target && target.role === "prop" && target.alive) {
-        target.alive = false;
-        target.hidden = false;
-        checkWinCondition();
-        broadcastState();
+      if (target && target.role === "verstecker" && !target.isFound) {
+        target.isFound = true; checkWinCondition(); broadcastState();
       }
       return;
     }
 
     if (msg.type === "reset_lobby") {
       if (me.id !== hostId()) return;
-      resetToLobby();
-      broadcastState();
-      return;
+      resetToLobby(); broadcastState(); return;
     }
   });
 
   ws.on("close", () => {
     if (!me) return;
     players = players.filter(p => p.id !== me.id);
-
-    if (status === "hiding" || status === "hunting") {
-      const hunterLeft = me.role === "hunter";
-      if (hunterLeft || players.length < 2) {
-        resetToLobby();
-      } else {
-        checkWinCondition();
-      }
+    if (status === "PLAYING") {
+      if (me.role === "sucher" || players.length < 2) resetToLobby();
+      else checkWinCondition();
     }
-
-    if (players.length === 0) {
-      status = "lobby";
-      winner = null;
-      nextId = 1;
-    }
+    if (players.length === 0) { status = "LOBBY"; winner = null; nextId = 1; }
     broadcastState();
   });
 });
@@ -196,11 +159,8 @@ server.listen(PORT, () => {
       if (net.family === "IPv4" && !net.internal) addresses.push(net.address);
     }
   }
-  console.log("\n=== PROP//HUNT Server läuft ===");
-  console.log(`Lokal öffnen: http://localhost:${PORT}`);
-  if (addresses.length) {
-    console.log("Im WLAN öffnen:");
-    addresses.forEach(a => console.log(`   http://${a}:${PORT}`));
-  }
-  console.log("===============================\n");
+  console.log("\n=== Hide & Seek Backrooms Server läuft ===");
+  console.log(`Lokal: http://localhost:${PORT}`);
+  addresses.forEach(a => console.log(`WLAN:  http://${a}:${PORT}`));
+  console.log("==========================================\n");
 });
